@@ -17,7 +17,7 @@ st.set_page_config(page_title="RAG Assistant", page_icon="🔎", layout="wide")
 # Cache the pipeline so it isn't rebuilt on every interaction/rerun
 @st.cache_resource
 def get_pipeline():
-    return RAGPipeline(enable_logging=True)
+    return RAGPipeline(enable_logging=False)  # set True once PostgreSQL is set up
 
 
 pipeline = get_pipeline()
@@ -31,6 +31,16 @@ with st.sidebar:
 
     store = VectorStore()
     st.metric("Chunks indexed", store.count())
+
+    # Show which documents have been uploaded so far, and how many
+    # chunks each contributed to the index.
+    docs = store.list_documents()
+    if docs:
+        st.subheader("📚 Uploaded Documents")
+        for d in docs:
+            st.markdown(f"- **{d['source']}** — {d['chunks']} chunks")
+    else:
+        st.caption("No documents uploaded yet.")
 
     uploaded_files = st.file_uploader(
         "Upload .txt or .pdf files to add to the index",
