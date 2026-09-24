@@ -70,6 +70,26 @@ class VectorStore:
     def count(self) -> int:
         return self.collection.count()
 
+    def list_documents(self) -> List[Dict]:
+        """Return a summary of every unique source document currently indexed,
+        with how many chunks each one contributed. Used to show an upload
+        history in the UI."""
+        if self.count() == 0:
+            return []
+
+        results = self.collection.get()
+        metadatas = results.get("metadatas", [])
+
+        counts: Dict[str, int] = {}
+        for meta in metadatas:
+            source = meta.get("source", "unknown")
+            counts[source] = counts.get(source, 0) + 1
+
+        return [
+            {"source": source, "chunks": chunk_count}
+            for source, chunk_count in sorted(counts.items())
+        ]
+
     def reset(self):
         self.client.delete_collection(CHROMA_COLLECTION)
         self.collection = self.client.get_or_create_collection(
