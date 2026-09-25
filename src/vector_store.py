@@ -1,89 +1,116 @@
 """
 vector_store.py
 ----------------
-Wraps ChromaDB so the app can add and search document chunks without
-touching the Chroma API directly. Chroma persists to disk so the
-index survives between runs.
+Wraps Qdrant so the app can add and search document chunks without
+touching the Qdrant API directly. Qdrant Cloud stores data remotely,
+so it survives app restarts/redeploys — unlike a local Chroma folder
+on a host with no persistent disk.
 """
 
+import uuid
 from typing import List, Dict
-import chromadb
 
-from config import CHROMA_DIR, CHROMA_COLLECTION
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance, PointStruct
+
+from config import QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION
 from src.embeddings import embed_texts, embed_query
+
+
+def _point_id(source: str, chunk_id: int) -> str:
+    """Deterministic ID so re-ingesting the same chunk overwrites it
+    instead of creating a duplicate point."""
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source}-{chunk_id}"))
 
 
 class VectorStore:
     def __init__(self):
-        self.client = chromadb.PersistentClient(path=CHROMA_DIR)
-        self.collection = self.client.get_or_create_collection(
-            name=CHROMA_COLLECTION,
-            metadata={"hnsw:space": "cosine"},
-        )
+        self.client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+        self.collection_name = QDRANT_COLLECTION
+
+    def _collection_exists(self) -> bool:
+        existing = [c.name for c in self.client.get_collections().collections]
+        return self.collection_name in existing
+
+    def _ensure_collection(self, vector_size: int):
+        if not self._collection_exists():
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
 
     def add_chunks(self, chunks: List[Dict]):
         """chunks: [{"source": ..., "chunk_id": ..., "text": ...}, ...]"""
         if not chunks:
             return
 
-        texts = [c["text"] for c in chunks]
-        ids = [f"{c['source']}-{c['chunk_id']}" for c in chunks]
-        metadatas = [{"source": c["source"], "chunk_id": c["chunk_id"]} for c in chunks]
-
-        # Embed in manageable batches so one huge document doesn't
-        # blow past API payload limits.
         batch_size = 50
-        for start in range(0, len(texts), batch_size):
-            batch_texts = texts[start:start + batch_size]
-            batch_ids = ids[start:start + batch_size]
-            batch_meta = metadatas[start:start + batch_size]
-            batch_vectors = embed_texts(batch_texts)
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start:start + batch_size]
+            texts = [c["text"] for c in batch]
+            vectors = embed_texts(texts)
 
-            self.collection.upsert(
-                ids=batch_ids,
-                embeddings=batch_vectors,
-                documents=batch_texts,
-                metadatas=batch_meta,
-            )
+            self._ensure_collection(vector_size=len(vectors[0]))
+
+            points = [
+                PointStruct(
+                    id=_point_id(c["source"], c["chunk_id"]),
+                    vector=vector,
+                    payload={
+                        "source": c["source"],
+                        "chunk_id": c["chunk_id"],
+                        "text": c["text"],
+                    },
+                )
+                for c, vector in zip(batch, vectors)
+            ]
+            self.client.upsert(collection_name=self.collection_name, points=points)
 
     def search(self, query: str, top_k: int) -> List[Dict]:
+        if not self._collection_exists():
+            return []
+
         query_vector = embed_query(query)
-        results = self.collection.query(
-            query_embeddings=[query_vector],
-            n_results=top_k,
+        results = self.client.search(
+            collection_name=self.collection_name,
+            query_vector=query_vector,
+            limit=top_k,
         )
 
         hits = []
-        docs = results.get("documents", [[]])[0]
-        metas = results.get("metadatas", [[]])[0]
-        dists = results.get("distances", [[]])[0]
-
-        for text, meta, dist in zip(docs, metas, dists):
+        for r in results:
             hits.append({
-                "text": text,
-                "source": meta.get("source"),
-                "chunk_id": meta.get("chunk_id"),
-                "distance": dist,
+                "text": r.payload.get("text"),
+                "source": r.payload.get("source"),
+                "chunk_id": r.payload.get("chunk_id"),
+                "distance": round(1 - r.score, 4),
             })
         return hits
 
     def count(self) -> int:
-        return self.collection.count()
+        if not self._collection_exists():
+            return 0
+        return self.client.count(collection_name=self.collection_name, exact=True).count
 
     def list_documents(self) -> List[Dict]:
-        """Return a summary of every unique source document currently indexed,
-        with how many chunks each one contributed. Used to show an upload
-        history in the UI."""
-        if self.count() == 0:
+        if not self._collection_exists() or self.count() == 0:
             return []
 
-        results = self.collection.get()
-        metadatas = results.get("metadatas", [])
-
         counts: Dict[str, int] = {}
-        for meta in metadatas:
-            source = meta.get("source", "unknown")
-            counts[source] = counts.get(source, 0) + 1
+        next_offset = None
+        while True:
+            points, next_offset = self.client.scroll(
+                collection_name=self.collection_name,
+                limit=200,
+                offset=next_offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for p in points:
+                source = p.payload.get("source", "unknown")
+                counts[source] = counts.get(source, 0) + 1
+            if next_offset is None:
+                break
 
         return [
             {"source": source, "chunks": chunk_count}
@@ -91,8 +118,5 @@ class VectorStore:
         ]
 
     def reset(self):
-        self.client.delete_collection(CHROMA_COLLECTION)
-        self.collection = self.client.get_or_create_collection(
-            name=CHROMA_COLLECTION,
-            metadata={"hnsw:space": "cosine"},
-        )
+        if self._collection_exists():
+            self.client.delete_collection(self.collection_name)
