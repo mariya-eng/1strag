@@ -9,17 +9,17 @@ into the source code.
 import os
 from dotenv import load_dotenv
 
-# Load variables from a .env file (if present) into the environment
 load_dotenv()
 
 # ---- Gemini (LLM + embeddings) ----
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_LLM_MODEL = os.getenv("GEMINI_LLM_MODEL", "gemini-2.0-flash")
-GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/text-embedding-004")
+GEMINI_LLM_MODEL = os.getenv("GEMINI_LLM_MODEL", "gemini-3.5-flash")
+GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
 
-# ---- Chroma (vector store) ----
-CHROMA_DIR = os.getenv("CHROMA_DIR", "chroma_db")
-CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "rag_documents")
+# ---- Qdrant (vector store) ----
+QDRANT_URL = os.getenv("QDRANT_URL", "")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_documents")
 
 # ---- Chunking ----
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
